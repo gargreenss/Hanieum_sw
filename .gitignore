@@ -5,3 +5,5 @@ My-First-Project-*/
 Stick-*/
 __pycache__/
 *.cache
+haiku_test/test_images/
+haiku_test/results.csv
