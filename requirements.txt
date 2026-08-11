@@ -1,3 +1,7 @@
 ultralytics
 roboflow
 python-dotenv
+anthropic
+pillow
+opencv-python
+websockets
