@@ -1,25 +1,27 @@
 """
-AI 스마트 식사 보조 시스템 - 로컬 WebSocket 서버 (v19 통합판)
+AI 스마트 식사 보조 시스템 - WebSocket 서버 (v19 통합판 / 로컬·EC2 겸용)
 
-[합친 것]
-- 기존 server.py : WebSocket 수신, 파이 응답(JSON), 디버그 저장/창, 쿨다운
-- webcam_test v19 : 끝 클래스(top/s_top/f_top) 직접 탐지, 흔들림 보정(EMA),
-                    흐림(블러) 검사, MOVE_RESET(같은 자리 재호출 방지)
+[이번 수정]
+1. SHOW_YOLO_WINDOW 자동 감지 — 화면 없는 리눅스(EC2)에서는 자동으로 꺼짐
+   → 로컬(윈도우)에선 디버그 창 뜨고, EC2에선 안전하게 비활성. 깃 하나로 양쪽 운영.
+2. 파란 원 마커 — Haiku로 보내는 크롭에 끝점 위치를 파란 원으로 표시
+   → 프롬프트가 이미 "파란색 원이 가리키는 음식이 답"을 지원하므로 정확도 향상.
 
 구조:
 Raspberry Pi 5 → JPEG/WebSocket → 이 서버
   → YOLO(v19): 식기 '끝' 클래스 탐지 → 끝점 흔들림 보정
-  → 멈춤 + 쿨다운 + 위치이동 조건 → 크롭 → 흐림 검사
+  → 멈춤 + 쿨다운 + 위치이동 조건 → 크롭(+파란 원) → 흐림 검사
   → Claude Haiku 판별 → JSON 반환 → 파이 TTS
 
-필요: pip install ultralytics opencv-python websockets numpy anthropic pillow python-dotenv
-실행: python server_v19.py
-※ EC2 배포 시 SHOW_YOLO_WINDOW = False 필수!
+필요(로컬): pip install ultralytics opencv-python websockets numpy anthropic pillow python-dotenv
+필요(EC2) : pip install ultralytics opencv-python-headless websockets numpy anthropic pillow python-dotenv
+실행: python server.py
 """
 import asyncio
 import base64
 import json
 import os
+import platform
 import time
 import glob
 from collections import deque
@@ -52,7 +54,6 @@ PORT = 8765
 # ============================================================
 # YOLO (v19: 끝 클래스 직접 탐지 모델)
 # ============================================================
-# models/best.pt 우선, 없으면 같은 폴더 best.pt
 _candidates = [BASE / "models" / "best.pt", BASE / "best.pt"]
 MODEL_PATH = next((p for p in _candidates if p.exists()), None)
 if MODEL_PATH is None:
@@ -61,24 +62,26 @@ if MODEL_PATH is None:
 model = YOLO(str(MODEL_PATH))
 print(f"[서버] YOLO 모델 로드 완료: {MODEL_PATH}")
 
-# 끝 클래스들 (젓가락/숟가락/포크 끝)
 TIP_CLASSES = {"top", "s_top", "f_top"}
 
 # ============================================================
 # 튜닝값 (v19 기준)
 # ============================================================
 YOLO_CONF = 0.40
-STOP_FRAMES = 6          # 최근 N프레임으로 멈춤 판단
-STOP_PIXELS = 65         # 이동량이 이 픽셀 미만이면 정지
-COOLDOWN = 4.0           # Haiku 재호출 금지 시간(초)
-CROP_RATIO = 0.35        # 크롭 크기 = 짧은 변 * 비율
-MISS_TOLERANCE = 5       # 탐지 깜빡임 허용 프레임
-SMOOTH_ALPHA = 0.3       # 끝점 흔들림 보정(EMA)
-MOVE_RESET = 80          # 직전 판별 위치에서 이만큼 벗어나야 재호출
-BLUR_THRESHOLD = 100     # 선명도 기준 (Laplacian, 로그 보고 조정)
-TIP_OFFSET = (-0.25, 0.25)   # 빨간 점 보정: 박스 크기 대비 (x비율, y비율)
-                             # 박스가 커서 점이 위로 치우침 → 왼쪽 아래로 밀기
-                             # 덜 가면 -0.35/0.35, 너무 가면 -0.15/0.15로 조정
+STOP_FRAMES = 6
+STOP_PIXELS = 65
+COOLDOWN = 4.0
+CROP_RATIO = 0.35
+MISS_TOLERANCE = 5
+SMOOTH_ALPHA = 0.3
+MOVE_RESET = 80
+BLUR_THRESHOLD = 100
+TIP_OFFSET = (-0.25, 0.25)   # 빨간 점 보정 (박스 크기 대비 x,y 비율)
+
+# ★ 파란 원 마커 (Haiku 크롭에 끝점 표시 — 프롬프트가 이 원을 참조함)
+MARK_BLUE_CIRCLE = True
+BLUE_RADIUS = 14             # 원 반지름(px)
+BLUE_THICKNESS = 3           # 선 두께
 
 # ============================================================
 # 디버그 설정
@@ -89,7 +92,14 @@ DEBUG_DIR.mkdir(exist_ok=True)
 SAVE_YOLO_EVERY = 5
 MAX_YOLO_DEBUG_FILES = 200
 MAX_CROP_DEBUG_FILES = 100
-SHOW_YOLO_WINDOW = True   # ★ EC2에서는 반드시 False
+
+# ★ 디버그 창 자동 감지:
+#   - 윈도우/맥(로컬) → 창 표시
+#   - 리눅스인데 DISPLAY 없음(EC2 등 headless) → 자동으로 끔
+SHOW_YOLO_WINDOW = True
+if platform.system() == "Linux" and not os.environ.get("DISPLAY"):
+    SHOW_YOLO_WINDOW = False
+    print("[서버] headless 환경 감지 → 디버그 창 비활성 (사진 저장은 유지)")
 
 
 # ============================================================
@@ -99,8 +109,8 @@ class ClientState:
     def __init__(self):
         self.recent = deque(maxlen=STOP_FRAMES)
         self.last_trigger = 0.0
-        self.last_pos = None      # 마지막 판별 위치 (MOVE_RESET용)
-        self.prev_tip = None      # 흔들림 보정용 직전 끝점
+        self.last_pos = None
+        self.prev_tip = None
         self.miss_count = 0
         self.frame_count = 0
 
@@ -125,10 +135,9 @@ def get_tip(results):
         return None
     box = max(tips, key=lambda b: float(b.conf[0]))
     x1, y1, x2, y2 = map(int, box.xyxy[0])
-    # ── 빨간 점 보정: 박스 중심을 박스 크기 비율만큼 왼쪽 아래로 ──
     cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-    cx += int((x2 - x1) * TIP_OFFSET[0])   # 왼쪽으로 박스폭의 25%
-    cy += int((y2 - y1) * TIP_OFFSET[1])   # 아래로 박스높이의 25%
+    cx += int((x2 - x1) * TIP_OFFSET[0])
+    cy += int((y2 - y1) * TIP_OFFSET[1])
     return {
         "center": (cx, cy),
         "box": (x1, y1, x2, y2),
@@ -146,7 +155,6 @@ def is_stopped(state):
 
 
 def is_sharp(img):
-    """v19: 흐린 프레임이면 Haiku 호출 보류"""
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     score = cv2.Laplacian(gray, cv2.CV_64F).var()
     return score >= BLUR_THRESHOLD, score
@@ -159,6 +167,18 @@ def crop_around(frame, center):
     x1, y1 = max(0, cx - size), max(0, cy - size)
     x2, y2 = min(w, cx + size), min(h, cy + size)
     return frame[y1:y2, x1:x2], (x1, y1, x2, y2)
+
+
+def mark_tip_on_crop(crop, tip, crop_box):
+    """★ Haiku로 보낼 크롭에 끝점을 파란 원으로 표시 (BGR: 파랑=(255,0,0))"""
+    marked = crop.copy()
+    x1, y1, _, _ = crop_box
+    px, py = tip[0] - x1, tip[1] - y1
+    h, w = marked.shape[:2]
+    px = max(0, min(w - 1, px))
+    py = max(0, min(h - 1, py))
+    cv2.circle(marked, (px, py), BLUE_RADIUS, (255, 0, 0), BLUE_THICKNESS)
+    return marked
 
 
 def ask_haiku(crop_bgr):
@@ -182,7 +202,7 @@ def make_debug_frame(frame, results, tip=None, tip_info=None, crop_box=None):
 
 
 # ============================================================
-# 프레임 1장 처리 (v19 로직 통합)
+# 프레임 1장 처리
 # ============================================================
 def process_frame(frame, state):
     results = model(frame, conf=YOLO_CONF, verbose=False)
@@ -204,7 +224,6 @@ def process_frame(frame, state):
     if tip_info:
         raw_tip = tip_info["center"]
 
-        # ── v19: 흔들림 보정 (EMA) ──
         if state.prev_tip is None:
             tip = raw_tip
         else:
@@ -221,7 +240,6 @@ def process_frame(frame, state):
 
         now = time.time()
 
-        # ── v19: 같은 자리 재호출 방지 ──
         far_enough = (state.last_pos is None or
                       abs(tip[0] - state.last_pos[0]) > MOVE_RESET or
                       abs(tip[1] - state.last_pos[1]) > MOVE_RESET)
@@ -230,24 +248,25 @@ def process_frame(frame, state):
             crop, crop_box = crop_around(frame, tip)
 
             if crop.size != 0:
-                # ── v19: 흐림 검사 ──
                 sharp, score = is_sharp(crop)
                 response["sharpness"] = round(score, 1)
 
                 if not sharp:
                     print(f"[보류] 흐린 프레임(선명도 {score:.0f}) → 재시도 대기")
-                    # last_trigger 갱신 안 함 → 다음 프레임에 재시도
                 else:
                     state.last_trigger = now
                     state.last_pos = tip
 
+                    # ★ 파란 원 마커: 끝점 위치를 표시한 크롭을 Haiku로
+                    send_img = mark_tip_on_crop(crop, tip, crop_box) if MARK_BLUE_CIRCLE else crop
+
                     if SAVE_DEBUG:
-                        cv2.imwrite(str(DEBUG_DIR / f"crop_{state.frame_count:06d}_{int(now)}.jpg"), crop)
+                        cv2.imwrite(str(DEBUG_DIR / f"crop_{state.frame_count:06d}_{int(now)}.jpg"), send_img)
                         cleanup_debug_files("crop_*.jpg", MAX_CROP_DEBUG_FILES)
 
                     print(f"[트리거] {tip_info['class_name']} 멈춤(선명도 {score:.0f}) → Haiku 호출")
                     try:
-                        r = ask_haiku(crop)
+                        r = ask_haiku(send_img)
                         response["triggered"] = True
                         response["food"] = r.get("food")
                         response["input_tokens"] = r.get("input_tokens")
@@ -260,9 +279,8 @@ def process_frame(frame, state):
         state.miss_count += 1
         if state.miss_count > MISS_TOLERANCE:
             state.recent.clear()
-            state.prev_tip = None   # v19: 놓치면 보정도 리셋
+            state.prev_tip = None
 
-    # ── 디버그 화면 ──
     debug_frame = make_debug_frame(frame, results, tip, tip_info, crop_box)
     if SHOW_YOLO_WINDOW:
         cv2.imshow("YOLO DEBUG - Raspberry Pi Camera", debug_frame)
@@ -320,7 +338,7 @@ async def main():
     async with websockets.serve(handler, HOST, PORT, max_size=None):
         print()
         print("=" * 65)
-        print("AI 스마트 식사 보조 로컬 서버 (v19 통합판)")
+        print("AI 스마트 식사 보조 서버 (v19 / 로컬·EC2 겸용)")
         print("=" * 65)
         print(f"WebSocket : ws://{HOST}:{PORT}")
         print(f"YOLO      : {MODEL_PATH}")
@@ -328,6 +346,7 @@ async def main():
         print("Claude    : Haiku 4.5")
         print(f"정지 감지 : {STOP_FRAMES} frames / {STOP_PIXELS}px")
         print(f"Cooldown  : {COOLDOWN}s / 이동 리셋 {MOVE_RESET}px / 블러 {BLUR_THRESHOLD}")
+        print(f"파란 원   : {'ON' if MARK_BLUE_CIRCLE else 'OFF'} / 디버그 창: {'ON' if SHOW_YOLO_WINDOW else 'OFF(headless)'}")
         print(f"디버그    : {DEBUG_DIR}")
         print("=" * 65)
         print()
@@ -339,4 +358,7 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         print("\n[서버] 종료")
-        cv2.destroyAllWindows()
+        try:
+            cv2.destroyAllWindows()
+        except Exception:
+            pass
