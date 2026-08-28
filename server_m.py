@@ -10,9 +10,12 @@ AI 스마트 식사 보조 시스템 - WebSocket 서버 (v19 통합판 / 로컬�
    → 흐림 검사 + 끝점 신뢰도 + (food_recognizer 내 판별 불확실 처리) 3중 관문
 4. 색감 보정 추가 — Haiku로 보내는 크롭에만 그레이월드 화이트밸런스 + 감마
    + 노란색 약부스트 적용 (YOLO 입력에는 영향 없음)
-   → 학습 데이터(밝고 쨍한 색감)와 실사용 카메라 색감 차이 완화 목적
    → ENABLE_COLOR_CORRECTION 플래그로 on/off A/B 테스트 가능
 5. SHOW_YOLO_WINDOW 자동 감지 유지 — EC2(headless)에서는 자동으로 꺼짐
+6. ★ 웹 디버그 화면 추가 — EC2에서도 브라우저로 YOLO 디버그 화면 실시간 확인
+   → 서버 켠 뒤 브라우저에서  http://서버IP:8080  접속
+   → EC2 보안그룹에 TCP 8080 인바운드 규칙 필요
+   → ENABLE_WEB_DEBUG 플래그로 on/off
 
 구조:
 Raspberry Pi 5 → JPEG/WebSocket → 이 서버
@@ -29,9 +32,11 @@ import base64
 import json
 import os
 import platform
+import threading
 import time
 import glob
 from collections import deque
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import cv2
@@ -58,6 +63,11 @@ from food_recognizer import recognize_food   # 같은 폴더의 food_recognizer.
 HOST = "0.0.0.0"
 PORT = 8765
 
+# ★ 웹 디버그 화면 (브라우저에서 http://서버IP:8080)
+ENABLE_WEB_DEBUG = True
+WEB_DEBUG_PORT = 8080
+WEB_DEBUG_JPEG_QUALITY = 70
+
 # ============================================================
 # YOLO (v19: 끝 클래스 직접 탐지 모델)
 # ============================================================
@@ -74,13 +84,13 @@ TIP_CLASSES = {"top", "s_top", "f_top"}
 # ============================================================
 # 튜닝값 (v19 기준)
 # ============================================================
-YOLO_CONF = 0.30             # ★ 0.40 → 0.30 (추적 끊김 방지: conf가 문턱 근처에서 오가며 깜빡이는 것 완화)
+YOLO_CONF = 0.40
 TIP_MIN_CONF = 0.5           # ★ 끝점 신뢰도 관문: 미만이면 Haiku 호출 보류
-STOP_FRAMES = 4              # ★ 5 → 4 (멈춤 판정 추가 완화: 깜빡임 사이에도 트리거 도달)
+STOP_FRAMES = 5              # ★ 6 → 5 (멈춤 판정 완화)
 STOP_PIXELS = 80             # ★ 65 → 80
 COOLDOWN = 4.0
 CROP_RATIO = 0.35
-MISS_TOLERANCE = 15          # ★ 5 → 15 (탐지 깜빡임 허용: 잠깐 놓쳐도 카운팅 초기화 안 함)
+MISS_TOLERANCE = 5
 SMOOTH_ALPHA = 0.3
 MOVE_RESET = 80
 BLUR_THRESHOLD = 100
@@ -155,6 +165,83 @@ SHOW_YOLO_WINDOW = True
 if platform.system() == "Linux" and not os.environ.get("DISPLAY"):
     SHOW_YOLO_WINDOW = False
     print("[서버] headless 환경 감지 → 디버그 창 비활성 (사진 저장은 유지)")
+
+
+# ============================================================
+# ★ 웹 디버그 스트리밍 (MJPEG)
+#   EC2처럼 화면 없는 서버에서도 브라우저로 디버그 화면 확인
+#   http://서버IP:8080  ← 노트북/폰 브라우저에서 접속
+# ============================================================
+_web_lock = threading.Lock()
+_web_frame = None   # 최신 디버그 프레임의 JPEG 바이트
+
+
+def update_web_frame(debug_frame):
+    """최신 디버그 프레임을 JPEG로 압축해 보관 (스트리밍용)"""
+    global _web_frame
+    ok, jpg = cv2.imencode(
+        ".jpg", debug_frame,
+        [cv2.IMWRITE_JPEG_QUALITY, WEB_DEBUG_JPEG_QUALITY]
+    )
+    if ok:
+        with _web_lock:
+            _web_frame = jpg.tobytes()
+
+
+class _WebDebugHandler(BaseHTTPRequestHandler):
+
+    def do_GET(self):
+        if self.path == "/":
+            html = (
+                "<html><head><title>YOLO DEBUG</title></head>"
+                "<body style='margin:0;background:#111;text-align:center'>"
+                "<img src='/stream' style='max-width:100%;height:auto'>"
+                "</body></html>"
+            ).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(html)))
+            self.end_headers()
+            self.wfile.write(html)
+            return
+
+        if self.path != "/stream":
+            self.send_response(404)
+            self.end_headers()
+            return
+
+        # MJPEG 스트림
+        self.send_response(200)
+        self.send_header(
+            "Content-Type",
+            "multipart/x-mixed-replace; boundary=frame"
+        )
+        self.end_headers()
+        try:
+            while True:
+                with _web_lock:
+                    data = _web_frame
+                if data is not None:
+                    self.wfile.write(b"--frame\r\n")
+                    self.wfile.write(b"Content-Type: image/jpeg\r\n\r\n")
+                    self.wfile.write(data)
+                    self.wfile.write(b"\r\n")
+                time.sleep(0.1)   # 약 10fps
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass   # 브라우저 탭 닫음 → 정상 종료
+
+    def log_message(self, *args):
+        pass   # 접속 로그로 콘솔 지저분해지는 것 방지
+
+
+def start_web_debug():
+    try:
+        httpd = ThreadingHTTPServer((HOST, WEB_DEBUG_PORT), _WebDebugHandler)
+    except OSError as e:
+        print(f"[서버] 웹 디버그 시작 실패 (포트 {WEB_DEBUG_PORT}): {e}")
+        return
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    print(f"[서버] 웹 디버그 화면: http://서버IP:{WEB_DEBUG_PORT} (브라우저로 접속)")
 
 
 # ============================================================
@@ -349,6 +436,9 @@ def process_frame(frame, state):
     if SHOW_YOLO_WINDOW:
         cv2.imshow("YOLO DEBUG - Raspberry Pi Camera", debug_frame)
         cv2.waitKey(1)
+    # ★ 웹 디버그: 로컬이든 EC2든 브라우저에서 실시간 확인 가능
+    if ENABLE_WEB_DEBUG:
+        update_web_frame(debug_frame)
     if SAVE_DEBUG and state.frame_count % SAVE_YOLO_EVERY == 0:
         cv2.imwrite(str(DEBUG_DIR / f"yolo_{state.frame_count:06d}.jpg"), debug_frame)
         cleanup_debug_files("yolo_*.jpg", MAX_YOLO_DEBUG_FILES)
@@ -399,6 +489,8 @@ async def handler(ws):
 
 
 async def main():
+    if ENABLE_WEB_DEBUG:
+        start_web_debug()
     async with websockets.serve(handler, HOST, PORT, max_size=None):
         print()
         print("=" * 65)
@@ -414,6 +506,7 @@ async def main():
         print(f"색감 보정 : {'ON' if ENABLE_COLOR_CORRECTION else 'OFF'} "
               f"(감마 {GAMMA} / 노랑 채도 x{YELLOW_SAT_GAIN})")
         print(f"파란 원   : {'ON' if MARK_BLUE_CIRCLE else 'OFF'} / 디버그 창: {'ON' if SHOW_YOLO_WINDOW else 'OFF(headless)'}")
+        print(f"웹 화면   : {'http://서버IP:' + str(WEB_DEBUG_PORT) if ENABLE_WEB_DEBUG else 'OFF'}")
         print(f"디버그    : {DEBUG_DIR}")
         print("=" * 65)
         print()
