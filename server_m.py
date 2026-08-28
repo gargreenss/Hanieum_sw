@@ -86,7 +86,7 @@ TIP_CLASSES = {"top", "s_top", "f_top"}
 # ============================================================
 YOLO_CONF = 0.40
 TIP_MIN_CONF = 0.5           # ★ 끝점 신뢰도 관문: 미만이면 Haiku 호출 보류
-STOP_FRAMES = 5              # ★ 6 → 5 (멈춤 판정 완화)
+STOP_FRAMES = 3              # ★ 5 → 3 (멈춤 판정 약 3초 → 2초)
 STOP_PIXELS = 80             # ★ 65 → 80
 COOLDOWN = 4.0
 CROP_RATIO = 0.35
@@ -102,9 +102,37 @@ BLUE_RADIUS = 14             # 원 반지름(px)
 BLUE_THICKNESS = 3           # 선 두께
 
 # ============================================================
+# ★★ 전체 프레임 보정 (YOLO 입력 포함 — 수신 즉시 적용)
+#   학습 데이터(밝고 채도 높은 사진)와 카메라 입력의 색감 차이 완화
+#   웹 디버그 화면에도 보정된 모습이 그대로 보임 → 눈으로 확인하며 튜닝
+# ============================================================
+ENABLE_FRAME_ENHANCE = True   # 끄면 이전과 동일
+FRAME_GAMMA = 1.25            # 밝기: 1.0=그대로, 1.2~1.4 권장 (클수록 밝음)
+FRAME_SAT_GAIN = 1.30         # 채도: 1.0=그대로, 1.2~1.5 권장 (클수록 쨍함)
+
+_FRAME_GAMMA_LUT = np.array(
+    [((i / 255.0) ** (1.0 / FRAME_GAMMA)) * 255 for i in range(256)]
+).astype(np.uint8)
+
+
+def enhance_frame(frame):
+    """수신 프레임 전체를 밝기(감마) + 채도 부스트 — YOLO/크롭/웹화면 모두 적용"""
+    out = cv2.LUT(frame, _FRAME_GAMMA_LUT)
+    hsv = cv2.cvtColor(out, cv2.COLOR_BGR2HSV).astype(np.float32)
+    h, s, v = cv2.split(hsv)
+    s = np.clip(s * FRAME_SAT_GAIN, 0, 255)
+    out = cv2.merge([h, s, v]).astype(np.uint8)
+    return cv2.cvtColor(out, cv2.COLOR_HSV2BGR)
+
+
+# ============================================================
 # ★ 색감 보정 (Haiku 전송 크롭에만 적용, YOLO 입력엔 미적용)
+#   ※ ENABLE_FRAME_ENHANCE가 True면 이미 프레임이 보정돼 있으므로
+#     이중 보정을 피하려고 아래에서 자동으로 꺼짐
 # ============================================================
 ENABLE_COLOR_CORRECTION = True   # A/B 테스트 시 여기만 토글
+if ENABLE_FRAME_ENHANCE:
+    ENABLE_COLOR_CORRECTION = False   # 이중 보정 방지 (감마 두 번 → 과노출)
 GAMMA = 1.2                      # 1.0=변화 없음, 클수록 밝아짐 (어두운 카메라 보정)
 YELLOW_SAT_GAIN = 1.25           # 노란색 채도 배율 (계란말이 등) — 과하면 역효과
 YELLOW_VAL_GAIN = 1.05           # 노란색 밝기 배율
@@ -465,6 +493,10 @@ async def handler(ws):
                 print("[서버] JPEG 디코딩 실패")
                 continue
 
+            # ★★ 전체 프레임 보정 (YOLO 입력 전에 적용)
+            if ENABLE_FRAME_ENHANCE:
+                frame = enhance_frame(frame)
+
             state.frame_count += 1
             response = await asyncio.to_thread(process_frame, frame, state)
             response["frame_id"] = data.get("frame_id")
@@ -503,6 +535,8 @@ async def main():
         print(f"정지 감지 : {STOP_FRAMES} frames / {STOP_PIXELS}px")
         print(f"끝점 관문 : TIP_MIN_CONF {TIP_MIN_CONF}")
         print(f"Cooldown  : {COOLDOWN}s / 이동 리셋 {MOVE_RESET}px / 블러 {BLUR_THRESHOLD}")
+        print(f"프레임 보정: {'ON' if ENABLE_FRAME_ENHANCE else 'OFF'} "
+              f"(감마 {FRAME_GAMMA} / 채도 x{FRAME_SAT_GAIN}) ← YOLO 입력 포함")
         print(f"색감 보정 : {'ON' if ENABLE_COLOR_CORRECTION else 'OFF'} "
               f"(감마 {GAMMA} / 노랑 채도 x{YELLOW_SAT_GAIN})")
         print(f"파란 원   : {'ON' if MARK_BLUE_CIRCLE else 'OFF'} / 디버그 창: {'ON' if SHOW_YOLO_WINDOW else 'OFF(headless)'}")
