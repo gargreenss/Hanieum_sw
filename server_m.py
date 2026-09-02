@@ -84,13 +84,13 @@ TIP_CLASSES = {"top", "s_top", "f_top"}
 # ============================================================
 # 튜닝값 (v19 기준)
 # ============================================================
-YOLO_CONF = 0.35             # ★ 0.40 → 0.35 (탐지 임계값 완화)
+YOLO_CONF = 0.20             # ★ 0.40 → 0.35 (탐지 임계값 완화)
 TIP_MIN_CONF = 0.40          # ★ 0.5 → 0.40 (끝점 신뢰도 관문 완화: 미만이면 Haiku 호출 보류)
 STOP_FRAMES = 2      # ★ 5 → 3 (멈춤 판정 약 3초 → 2초)
 STOP_PIXELS = 100             # ★ 65 → 80
 COOLDOWN = 4.0
 CROP_RATIO = 0.35
-MISS_TOLERANCE = 5
+MISS_TOLERANCE = 30
 SMOOTH_ALPHA = 0.3
 MOVE_RESET = 80
 BLUR_THRESHOLD = 100
