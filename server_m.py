@@ -87,12 +87,12 @@ TIP_CLASSES = {"top", "s_top", "f_top"}
 YOLO_CONF = 0.20             # ★ 0.40 → 0.35 (탐지 임계값 완화)
 TIP_MIN_CONF = 0.32          # ★ 0.5 → 0.40 (끝점 신뢰도 관문 완화: 미만이면 Haiku 호출 보류)
 STOP_FRAMES = 2      # ★ 5 → 3 (멈춤 판정 약 3초 → 2초)
-STOP_PIXELS = 100             # ★ 65 → 80
+STOP_PIXELS = 60             # ★ 65 → 80
 COOLDOWN = 4.0
 CROP_RATIO = 0.35
 MISS_TOLERANCE = 30
-SMOOTH_ALPHA = 0.3
-MOVE_RESET = 80
+SMOOTH_ALPHA = 0.5
+MOVE_RESET = 40
 BLUR_THRESHOLD = 20
 TIP_OFFSET = (-0.25, 0.25)   # 빨간 점 보정 (박스 크기 대비 x,y 비율)
 
