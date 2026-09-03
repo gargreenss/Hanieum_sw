@@ -10,12 +10,9 @@ AI 스마트 식사 보조 시스템 - WebSocket 서버 (v19 통합판 / 로컬�
    → 흐림 검사 + 끝점 신뢰도 + (food_recognizer 내 판별 불확실 처리) 3중 관문
 4. 색감 보정 추가 — Haiku로 보내는 크롭에만 그레이월드 화이트밸런스 + 감마
    + 노란색 약부스트 적용 (YOLO 입력에는 영향 없음)
+   → 학습 데이터(밝고 쨍한 색감)와 실사용 카메라 색감 차이 완화 목적
    → ENABLE_COLOR_CORRECTION 플래그로 on/off A/B 테스트 가능
 5. SHOW_YOLO_WINDOW 자동 감지 유지 — EC2(headless)에서는 자동으로 꺼짐
-6. ★ 웹 디버그 화면 추가 — EC2에서도 브라우저로 YOLO 디버그 화면 실시간 확인
-   → 서버 켠 뒤 브라우저에서  http://서버IP:8080  접속
-   → EC2 보안그룹에 TCP 8080 인바운드 규칙 필요
-   → ENABLE_WEB_DEBUG 플래그로 on/off
 
 구조:
 Raspberry Pi 5 → JPEG/WebSocket → 이 서버
@@ -32,11 +29,9 @@ import base64
 import json
 import os
 import platform
-import threading
 import time
 import glob
 from collections import deque
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import cv2
@@ -63,11 +58,6 @@ from food_recognizer import recognize_food   # 같은 폴더의 food_recognizer.
 HOST = "0.0.0.0"
 PORT = 8765
 
-# ★ 웹 디버그 화면 (브라우저에서 http://서버IP:8080)
-ENABLE_WEB_DEBUG = True
-WEB_DEBUG_PORT = 8080
-WEB_DEBUG_JPEG_QUALITY = 70
-
 # ============================================================
 # YOLO (v19: 끝 클래스 직접 탐지 모델)
 # ============================================================
@@ -84,16 +74,16 @@ TIP_CLASSES = {"top", "s_top", "f_top"}
 # ============================================================
 # 튜닝값 (v19 기준)
 # ============================================================
-YOLO_CONF = 0.20             # ★ 0.40 → 0.35 (탐지 임계값 완화)
-TIP_MIN_CONF = 0.32          # ★ 0.5 → 0.40 (끝점 신뢰도 관문 완화: 미만이면 Haiku 호출 보류)
-STOP_FRAMES = 2      # ★ 5 → 3 (멈춤 판정 약 3초 → 2초)
-STOP_PIXELS = 60             # ★ 65 → 80
+YOLO_CONF = 0.30             # ★ 0.40 → 0.30 (추적 끊김 방지: conf가 문턱 근처에서 오가며 깜빡이는 것 완화)
+TIP_MIN_CONF = 0.5           # ★ 끝점 신뢰도 관문: 미만이면 Haiku 호출 보류
+STOP_FRAMES = 4              # ★ 5 → 4 (멈춤 판정 추가 완화: 깜빡임 사이에도 트리거 도달)
+STOP_PIXELS = 80             # ★ 65 → 80
 COOLDOWN = 4.0
 CROP_RATIO = 0.35
-MISS_TOLERANCE = 30
-SMOOTH_ALPHA = 0.5
-MOVE_RESET = 40
-BLUR_THRESHOLD = 20
+MISS_TOLERANCE = 15          # ★ 5 → 15 (탐지 깜빡임 허용: 잠깐 놓쳐도 카운팅 초기화 안 함)
+SMOOTH_ALPHA = 0.3
+MOVE_RESET = 80
+BLUR_THRESHOLD = 100
 TIP_OFFSET = (-0.25, 0.25)   # 빨간 점 보정 (박스 크기 대비 x,y 비율)
 
 # 파란 원 마커 — ★ OFF (크롭 방식 채택 + 현재 프롬프트에 파란 원 문구 없음)
@@ -102,37 +92,9 @@ BLUE_RADIUS = 14             # 원 반지름(px)
 BLUE_THICKNESS = 3           # 선 두께
 
 # ============================================================
-# ★★ 전체 프레임 보정 (YOLO 입력 포함 — 수신 즉시 적용)
-#   학습 데이터(밝고 채도 높은 사진)와 카메라 입력의 색감 차이 완화
-#   웹 디버그 화면에도 보정된 모습이 그대로 보임 → 눈으로 확인하며 튜닝
-# ============================================================
-ENABLE_FRAME_ENHANCE = True   # 끄면 이전과 동일
-FRAME_GAMMA = 1.25            # 밝기: 1.0=그대로, 1.2~1.4 권장 (클수록 밝음)
-FRAME_SAT_GAIN = 1.30         # 채도: 1.0=그대로, 1.2~1.5 권장 (클수록 쨍함)
-
-_FRAME_GAMMA_LUT = np.array(
-    [((i / 255.0) ** (1.0 / FRAME_GAMMA)) * 255 for i in range(256)]
-).astype(np.uint8)
-
-
-def enhance_frame(frame):
-    """수신 프레임 전체를 밝기(감마) + 채도 부스트 — YOLO/크롭/웹화면 모두 적용"""
-    out = cv2.LUT(frame, _FRAME_GAMMA_LUT)
-    hsv = cv2.cvtColor(out, cv2.COLOR_BGR2HSV).astype(np.float32)
-    h, s, v = cv2.split(hsv)
-    s = np.clip(s * FRAME_SAT_GAIN, 0, 255)
-    out = cv2.merge([h, s, v]).astype(np.uint8)
-    return cv2.cvtColor(out, cv2.COLOR_HSV2BGR)
-
-
-# ============================================================
 # ★ 색감 보정 (Haiku 전송 크롭에만 적용, YOLO 입력엔 미적용)
-#   ※ ENABLE_FRAME_ENHANCE가 True면 이미 프레임이 보정돼 있으므로
-#     이중 보정을 피하려고 아래에서 자동으로 꺼짐
 # ============================================================
 ENABLE_COLOR_CORRECTION = True   # A/B 테스트 시 여기만 토글
-if ENABLE_FRAME_ENHANCE:
-    ENABLE_COLOR_CORRECTION = False   # 이중 보정 방지 (감마 두 번 → 과노출)
 GAMMA = 1.2                      # 1.0=변화 없음, 클수록 밝아짐 (어두운 카메라 보정)
 YELLOW_SAT_GAIN = 1.25           # 노란색 채도 배율 (계란말이 등) — 과하면 역효과
 YELLOW_VAL_GAIN = 1.05           # 노란색 밝기 배율
@@ -196,83 +158,6 @@ if platform.system() == "Linux" and not os.environ.get("DISPLAY"):
 
 
 # ============================================================
-# ★ 웹 디버그 스트리밍 (MJPEG)
-#   EC2처럼 화면 없는 서버에서도 브라우저로 디버그 화면 확인
-#   http://서버IP:8080  ← 노트북/폰 브라우저에서 접속
-# ============================================================
-_web_lock = threading.Lock()
-_web_frame = None   # 최신 디버그 프레임의 JPEG 바이트
-
-
-def update_web_frame(debug_frame):
-    """최신 디버그 프레임을 JPEG로 압축해 보관 (스트리밍용)"""
-    global _web_frame
-    ok, jpg = cv2.imencode(
-        ".jpg", debug_frame,
-        [cv2.IMWRITE_JPEG_QUALITY, WEB_DEBUG_JPEG_QUALITY]
-    )
-    if ok:
-        with _web_lock:
-            _web_frame = jpg.tobytes()
-
-
-class _WebDebugHandler(BaseHTTPRequestHandler):
-
-    def do_GET(self):
-        if self.path == "/":
-            html = (
-                "<html><head><title>YOLO DEBUG</title></head>"
-                "<body style='margin:0;background:#111;text-align:center'>"
-                "<img src='/stream' style='max-width:100%;height:auto'>"
-                "</body></html>"
-            ).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(html)))
-            self.end_headers()
-            self.wfile.write(html)
-            return
-
-        if self.path != "/stream":
-            self.send_response(404)
-            self.end_headers()
-            return
-
-        # MJPEG 스트림
-        self.send_response(200)
-        self.send_header(
-            "Content-Type",
-            "multipart/x-mixed-replace; boundary=frame"
-        )
-        self.end_headers()
-        try:
-            while True:
-                with _web_lock:
-                    data = _web_frame
-                if data is not None:
-                    self.wfile.write(b"--frame\r\n")
-                    self.wfile.write(b"Content-Type: image/jpeg\r\n\r\n")
-                    self.wfile.write(data)
-                    self.wfile.write(b"\r\n")
-                time.sleep(0.1)   # 약 10fps
-        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-            pass   # 브라우저 탭 닫음 → 정상 종료
-
-    def log_message(self, *args):
-        pass   # 접속 로그로 콘솔 지저분해지는 것 방지
-
-
-def start_web_debug():
-    try:
-        httpd = ThreadingHTTPServer((HOST, WEB_DEBUG_PORT), _WebDebugHandler)
-    except OSError as e:
-        print(f"[서버] 웹 디버그 시작 실패 (포트 {WEB_DEBUG_PORT}): {e}")
-        return
-    threading.Thread(target=httpd.serve_forever, daemon=True).start()
-    print(f"[서버] 웹 디버그 화면: http://서버IP:{WEB_DEBUG_PORT} (브라우저로 접속)")
-
-
-# ============================================================
 # 클라이언트 상태
 # ============================================================
 class ClientState:
@@ -283,6 +168,8 @@ class ClientState:
         self.prev_tip = None
         self.miss_count = 0
         self.frame_count = 0
+        self.t_point_start = None   # [측정] 이번 지목 시작 시각
+        self.last_food = None       # [측정] 직전 판별 음식 (중복 감지용)
 
 
 def cleanup_debug_files(pattern, max_files):
@@ -402,6 +289,9 @@ def process_frame(frame, state):
                    int(SMOOTH_ALPHA * raw_tip[1] + (1 - SMOOTH_ALPHA) * state.prev_tip[1]))
         state.prev_tip = tip
 
+        # [측정] recent가 비어있으면 새 지목 회차 시작 → 시각 기록
+        if not state.recent:
+            state.t_point_start = time.time()
         state.recent.append(tip)
         state.miss_count = 0
 
@@ -429,6 +319,7 @@ def process_frame(frame, state):
                     if not sharp:
                         print(f"[보류] 흐린 프레임(선명도 {score:.0f}) → 재시도 대기")
                     else:
+                        prev_trigger = state.last_trigger   # [측정] 중복 판정용 직전 호출 시각
                         state.last_trigger = now
                         state.last_pos = tip
 
@@ -445,13 +336,39 @@ def process_frame(frame, state):
 
                         print(f"[트리거] {tip_info['class_name']} 멈춤(선명도 {score:.0f}) → Haiku 호출")
                         try:
+                            # [측정] 판별 시간 + 지목→안내 총시간 계측
+                            t0 = time.time()
                             r = ask_haiku(send_img)
-                            response["triggered"] = True
-                            response["food"] = r.get("food")
+                            haiku_sec = time.time() - t0
+                            total_sec = time.time() - (state.t_point_start or t0)
+
+                            # [측정] 연속 중복 의심: 직전과 같은 음식 + 짧은 간격
+                            dup = ""
+                            if state.last_food == r.get("food") and prev_trigger > 0 and \
+                               (t0 - prev_trigger) < COOLDOWN + 3:
+                                dup = "DUP?"
+                            state.last_food = r.get("food")
+
+                            # [측정] CSV 기록 (첫 실행 시 헤더 자동 생성)
+                            log_path = BASE / "measure_log.csv"
+                            if not log_path.exists():
+                                log_path.write_text("timestamp,food,tip_conf,total_sec,haiku_sec,dup\n", encoding="utf-8")
+                            with open(log_path, "a", encoding="utf-8") as f:
+                                f.write(f"{int(t0)},{r.get('food')},{tip_info['confidence']:.2f},"
+                                        f"{total_sec:.2f},{haiku_sec:.2f},{dup}\n")
+
                             response["input_tokens"] = r.get("input_tokens")
                             response["output_tokens"] = r.get("output_tokens")
-                            print(f"[Haiku] 음식={response['food']} "
-                                  f"| in={response['input_tokens']} out={response['output_tokens']}")
+
+                            # 판별 불확실 시 안내 보류 (오안내 방지)
+                            if r.get("food") in ("알 수 없는 음식", "없음"):
+                                print(f"[보류] 판별 불확실({r.get('food')}) → 안내 생략 "
+                                      f"(계측 {total_sec:.1f}s/{haiku_sec:.1f}s) {dup}")
+                            else:
+                                response["triggered"] = True
+                                response["food"] = r.get("food")
+                                print(f"[측정] 지목→안내 {total_sec:.1f}s (판별 {haiku_sec:.1f}s) "
+                                      f"→ {response['food']} {dup}")
                         except Exception as e:
                             print("[Haiku 오류]", repr(e))
     else:
@@ -459,14 +376,12 @@ def process_frame(frame, state):
         if state.miss_count > MISS_TOLERANCE:
             state.recent.clear()
             state.prev_tip = None
+            state.t_point_start = None   # [측정] 회차 종료
 
     debug_frame = make_debug_frame(frame, results, tip, tip_info, crop_box)
     if SHOW_YOLO_WINDOW:
         cv2.imshow("YOLO DEBUG - Raspberry Pi Camera", debug_frame)
         cv2.waitKey(1)
-    # ★ 웹 디버그: 로컬이든 EC2든 브라우저에서 실시간 확인 가능
-    if ENABLE_WEB_DEBUG:
-        update_web_frame(debug_frame)
     if SAVE_DEBUG and state.frame_count % SAVE_YOLO_EVERY == 0:
         cv2.imwrite(str(DEBUG_DIR / f"yolo_{state.frame_count:06d}.jpg"), debug_frame)
         cleanup_debug_files("yolo_*.jpg", MAX_YOLO_DEBUG_FILES)
@@ -493,10 +408,6 @@ async def handler(ws):
                 print("[서버] JPEG 디코딩 실패")
                 continue
 
-            # ★★ 전체 프레임 보정 (YOLO 입력 전에 적용)
-            if ENABLE_FRAME_ENHANCE:
-                frame = enhance_frame(frame)
-
             state.frame_count += 1
             response = await asyncio.to_thread(process_frame, frame, state)
             response["frame_id"] = data.get("frame_id")
@@ -521,8 +432,6 @@ async def handler(ws):
 
 
 async def main():
-    if ENABLE_WEB_DEBUG:
-        start_web_debug()
     async with websockets.serve(handler, HOST, PORT, max_size=None):
         print()
         print("=" * 65)
@@ -535,12 +444,9 @@ async def main():
         print(f"정지 감지 : {STOP_FRAMES} frames / {STOP_PIXELS}px")
         print(f"끝점 관문 : TIP_MIN_CONF {TIP_MIN_CONF}")
         print(f"Cooldown  : {COOLDOWN}s / 이동 리셋 {MOVE_RESET}px / 블러 {BLUR_THRESHOLD}")
-        print(f"프레임 보정: {'ON' if ENABLE_FRAME_ENHANCE else 'OFF'} "
-              f"(감마 {FRAME_GAMMA} / 채도 x{FRAME_SAT_GAIN}) ← YOLO 입력 포함")
         print(f"색감 보정 : {'ON' if ENABLE_COLOR_CORRECTION else 'OFF'} "
               f"(감마 {GAMMA} / 노랑 채도 x{YELLOW_SAT_GAIN})")
         print(f"파란 원   : {'ON' if MARK_BLUE_CIRCLE else 'OFF'} / 디버그 창: {'ON' if SHOW_YOLO_WINDOW else 'OFF(headless)'}")
-        print(f"웹 화면   : {'http://서버IP:' + str(WEB_DEBUG_PORT) if ENABLE_WEB_DEBUG else 'OFF'}")
         print(f"디버그    : {DEBUG_DIR}")
         print("=" * 65)
         print()
