@@ -1,7 +1,8 @@
 """
 AI 스마트 식사 보조 시스템 - WebSocket 서버 (v19 통합판 / 로컬·EC2 겸용)
 
-[이번 수정 — v21]
+[이번 수정 — v22 / 시연 최종]
+★ 크롭 정밀화 — CROP_RATIO 0.18 / TIP_OFFSET y 0.10 (이웃 음식 혼입·끝점 하향 밀림 수정)
 ★ Haiku 크롭 색감 분리 — YOLO 입력은 보정본(감마+채도), Haiku로 보내는
   크롭은 '보정 전 원본'에서 잘라 자연색 전달 (김치 붉은기·김 광택 보존)
 ★ 트리거 즉시 processing 신호 — 멈춤 판정 통과 후 Haiku 호출 '직전'에
@@ -97,12 +98,12 @@ TIP_MIN_CONF = 0.32          # ★ 0.5 → 0.40 (끝점 신뢰도 관문 완화:
 STOP_FRAMES = 2      # ★ 5 → 3 (멈춤 판정 약 3초 → 2초)
 STOP_PIXELS = 60             # ★ 65 → 80
 COOLDOWN = 4.0
-CROP_RATIO = 0.25
+CROP_RATIO = 0.18            # ★ 0.25 → 0.18 (크롭 축소: 이웃 음식 혼입 방지)
 MISS_TOLERANCE = 30
 SMOOTH_ALPHA = 0.5
 MOVE_RESET = 40
 BLUR_THRESHOLD = 20
-TIP_OFFSET = (-0.25, 0.25)   # 빨간 점 보정 (박스 크기 대비 x,y 비율)
+TIP_OFFSET = (-0.25, 0.10)   # ★ y 0.25 → 0.10 (끝점이 아래로 밀리는 것 축소) — 웹 디버그 빨간 점으로 검증
 
 # 파란 원 마커 — ★ OFF (크롭 방식 채택 + 현재 프롬프트에 파란 원 문구 없음)
 MARK_BLUE_CIRCLE = False
@@ -550,7 +551,7 @@ async def main():
     async with websockets.serve(handler, HOST, PORT, max_size=None):
         print()
         print("=" * 65)
-        print("AI 스마트 식사 보조 서버 (v21 / 로컬·EC2 겸용)")
+        print("AI 스마트 식사 보조 서버 (v22 시연최종 / 로컬·EC2 겸용)")
         print("=" * 65)
         print(f"WebSocket : ws://{HOST}:{PORT}")
         print(f"YOLO      : {MODEL_PATH}")
