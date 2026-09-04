@@ -1,7 +1,13 @@
 """
 AI 스마트 식사 보조 시스템 - WebSocket 서버 (v19 통합판 / 로컬·EC2 겸용)
 
-[이번 수정]
+[이번 수정 — v20]
+★ 트리거 즉시 processing 신호 — 멈춤 판정 통과 후 Haiku 호출 '직전'에
+  파이로 {"type": "processing"} 을 먼저 전송 → 파이가 삑 효과음 재생
+  → 사용자가 "인식됐고 처리 중"임을 즉시 알 수 있음 (체감 딜레이 개선)
+  (파이도 processing 신호를 처리하는 v2 클라이언트여야 함 — 세트)
+
+[이전 수정 유지]
 1. 파란 원 마커 OFF — 실측(크롭 3/3 vs 마커 2/3)에서 크롭 방식 채택,
    현재 food_recognizer 프롬프트에 파란 원 문구 없음 → 마커는 음식만 가림.
    (프롬프트에 파란 원 문구를 다시 넣으면 MARK_BLUE_CIRCLE=True로 복원 가능)
@@ -18,10 +24,10 @@ AI 스마트 식사 보조 시스템 - WebSocket 서버 (v19 통합판 / 로컬�
    → ENABLE_WEB_DEBUG 플래그로 on/off
 
 구조:
-Raspberry Pi 5 → JPEG/WebSocket → 이 서버
+Raspberry Pi → JPEG/WebSocket → 이 서버
   → YOLO(v19): 식기 '끝' 클래스 탐지 → 끝점 흔들림 보정
-  → 멈춤 + 쿨다운 + 위치이동 + 끝점 신뢰도 조건 → 크롭 → 흐림 검사
-  → 색감 보정 → Claude Haiku 판별 → JSON 반환 → 파이 TTS
+  → 멈춤 + 쿨다운 + 위치이동 + 끝점 신뢰도 조건 → [processing 신호]
+  → 크롭 → 흐림 검사 → 색감 보정 → Claude Haiku 판별 → JSON 반환 → 파이 TTS
 
 필요(로컬): pip install ultralytics opencv-python websockets numpy anthropic pillow python-dotenv
 필요(EC2) : pip install ultralytics opencv-python-headless websockets numpy anthropic pillow python-dotenv
@@ -375,7 +381,7 @@ def make_debug_frame(frame, results, tip=None, tip_info=None, crop_box=None):
 # ============================================================
 # 프레임 1장 처리
 # ============================================================
-def process_frame(frame, state):
+def process_frame(frame, state, notify_processing=None):
     results = model(frame, conf=YOLO_CONF, verbose=False)
     tip_info = get_tip(results)
     crop_box = None
@@ -432,6 +438,11 @@ def process_frame(frame, state):
                         state.last_trigger = now
                         state.last_pos = tip
 
+                        # ★★ v20: 모든 관문 통과 = Haiku 호출 확정
+                        #    → 파이로 processing 신호 먼저 전송 (삑 효과음)
+                        if notify_processing:
+                            notify_processing()
+
                         send_img = mark_tip_on_crop(crop, tip, crop_box) if MARK_BLUE_CIRCLE else crop
 
                         # ★ 색감 보정: Haiku로 보내는 이미지에만 적용
@@ -445,7 +456,9 @@ def process_frame(frame, state):
 
                         print(f"[트리거] {tip_info['class_name']} 멈춤(선명도 {score:.0f}) → Haiku 호출")
                         try:
+                            t0 = time.time()
                             r = ask_haiku(send_img)
+                            print(f"[시간] Haiku 응답 {time.time() - t0:.2f}초")
                             response["triggered"] = True
                             response["food"] = r.get("food")
                             response["input_tokens"] = r.get("input_tokens")
@@ -480,6 +493,14 @@ def process_frame(frame, state):
 async def handler(ws):
     print("[서버] Raspberry Pi 연결됨")
     state = ClientState()
+    loop = asyncio.get_running_loop()
+
+    # ★ v20: YOLO 스레드에서 호출됨 → 이벤트 루프에 안전하게 전송 예약
+    def notify_processing():
+        asyncio.run_coroutine_threadsafe(
+            ws.send(json.dumps({"type": "processing"})), loop
+        )
+
     try:
         async for message in ws:
             data = json.loads(message)
@@ -498,7 +519,7 @@ async def handler(ws):
                 frame = enhance_frame(frame)
 
             state.frame_count += 1
-            response = await asyncio.to_thread(process_frame, frame, state)
+            response = await asyncio.to_thread(process_frame, frame, state, notify_processing)
             response["frame_id"] = data.get("frame_id")
 
             if state.frame_count % 10 == 0:
@@ -526,7 +547,7 @@ async def main():
     async with websockets.serve(handler, HOST, PORT, max_size=None):
         print()
         print("=" * 65)
-        print("AI 스마트 식사 보조 서버 (v19 / 로컬·EC2 겸용)")
+        print("AI 스마트 식사 보조 서버 (v20 / 로컬·EC2 겸용)")
         print("=" * 65)
         print(f"WebSocket : ws://{HOST}:{PORT}")
         print(f"YOLO      : {MODEL_PATH}")
@@ -541,6 +562,7 @@ async def main():
               f"(감마 {GAMMA} / 노랑 채도 x{YELLOW_SAT_GAIN})")
         print(f"파란 원   : {'ON' if MARK_BLUE_CIRCLE else 'OFF'} / 디버그 창: {'ON' if SHOW_YOLO_WINDOW else 'OFF(headless)'}")
         print(f"웹 화면   : {'http://서버IP:' + str(WEB_DEBUG_PORT) if ENABLE_WEB_DEBUG else 'OFF'}")
+        print(f"삑 신호   : ON (트리거 확정 → 파이로 processing 전송)")
         print(f"디버그    : {DEBUG_DIR}")
         print("=" * 65)
         print()
