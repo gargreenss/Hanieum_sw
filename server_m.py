@@ -1,7 +1,9 @@
 """
 AI 스마트 식사 보조 시스템 - WebSocket 서버 (v19 통합판 / 로컬·EC2 겸용)
 
-[이번 수정 — v20]
+[이번 수정 — v21]
+★ Haiku 크롭 색감 분리 — YOLO 입력은 보정본(감마+채도), Haiku로 보내는
+  크롭은 '보정 전 원본'에서 잘라 자연색 전달 (김치 붉은기·김 광택 보존)
 ★ 트리거 즉시 processing 신호 — 멈춤 판정 통과 후 Haiku 호출 '직전'에
   파이로 {"type": "processing"} 을 먼저 전송 → 파이가 삑 효과음 재생
   → 사용자가 "인식됐고 처리 중"임을 즉시 알 수 있음 (체감 딜레이 개선)
@@ -381,7 +383,7 @@ def make_debug_frame(frame, results, tip=None, tip_info=None, crop_box=None):
 # ============================================================
 # 프레임 1장 처리
 # ============================================================
-def process_frame(frame, state, notify_processing=None):
+def process_frame(frame, raw_frame, state, notify_processing=None):
     results = model(frame, conf=YOLO_CONF, verbose=False)
     tip_info = get_tip(results)
     crop_box = None
@@ -426,7 +428,7 @@ def process_frame(frame, state, notify_processing=None):
             if tip_info["confidence"] < TIP_MIN_CONF:
                 print(f"[보류] 끝점 신뢰도 낮음({tip_info['confidence']:.2f} < {TIP_MIN_CONF}) → 재시도 대기")
             else:
-                crop, crop_box = crop_around(frame, tip)
+                crop, crop_box = crop_around(raw_frame, tip)   # ★ Haiku 크롭은 원본 색 (보정 전)
 
                 if crop.size != 0:
                     sharp, score = is_sharp(crop)
@@ -514,12 +516,13 @@ async def handler(ws):
                 print("[서버] JPEG 디코딩 실패")
                 continue
 
-            # ★★ 전체 프레임 보정 (YOLO 입력 전에 적용)
+            # ★★ 원본 보관 후 보정 (YOLO는 보정본, Haiku 크롭은 원본 색)
+            raw_frame = frame
             if ENABLE_FRAME_ENHANCE:
                 frame = enhance_frame(frame)
 
             state.frame_count += 1
-            response = await asyncio.to_thread(process_frame, frame, state, notify_processing)
+            response = await asyncio.to_thread(process_frame, frame, raw_frame, state, notify_processing)
             response["frame_id"] = data.get("frame_id")
 
             if state.frame_count % 10 == 0:
@@ -547,7 +550,7 @@ async def main():
     async with websockets.serve(handler, HOST, PORT, max_size=None):
         print()
         print("=" * 65)
-        print("AI 스마트 식사 보조 서버 (v20 / 로컬·EC2 겸용)")
+        print("AI 스마트 식사 보조 서버 (v21 / 로컬·EC2 겸용)")
         print("=" * 65)
         print(f"WebSocket : ws://{HOST}:{PORT}")
         print(f"YOLO      : {MODEL_PATH}")
