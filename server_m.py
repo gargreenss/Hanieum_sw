@@ -1,7 +1,9 @@
 """
 AI 스마트 식사 보조 시스템 - WebSocket 서버 (v19 통합판 / 로컬·EC2 겸용)
 
-[이번 수정 — v22 / 시연 최종]
+[이번 수정 — v23 / 시연 최종]
+★ 유령 top 차단 — 끝점은 식기 몸통(stick 등) 박스 근처일 때만 인정
+  (그릇·책상 물건에 뜨는 가짜 top으로 인한 오트리거/오답 제거)
 ★ 크롭 정밀화 — CROP_RATIO 0.18 / TIP_OFFSET y 0.10 (이웃 음식 혼입·끝점 하향 밀림 수정)
 ★ Haiku 크롭 색감 분리 — YOLO 입력은 보정본(감마+채도), Haiku로 보내는
   크롭은 '보정 전 원본'에서 잘라 자연색 전달 (김치 붉은기·김 광택 보존)
@@ -307,12 +309,35 @@ def cleanup_debug_files(pattern, max_files):
 # v19: 끝 클래스에서 끝점 추출
 # ============================================================
 def get_tip(results):
-    """top/s_top/f_top 박스 중 conf 최고의 중심 = 끝점"""
-    tips = [b for b in results[0].boxes
+    """top/s_top/f_top 박스 중 conf 최고의 중심 = 끝점
+    ★ v23: 유령 탐지 차단 — 끝점은 반드시 식기 몸통(stick 등) 박스
+      근처에 있어야 인정. 그릇/책상 물건에 뜨는 가짜 top 제거."""
+    boxes = results[0].boxes
+    tips = [b for b in boxes
             if model.names[int(b.cls[0])] in TIP_CLASSES]
     if not tips:
         return None
-    box = max(tips, key=lambda b: float(b.conf[0]))
+
+    # 식기 몸통 박스 (끝 클래스가 아닌 것들)
+    utensils = [b for b in boxes
+                if model.names[int(b.cls[0])] not in TIP_CLASSES]
+
+    def near_utensil(tip_box, margin=40):
+        tx1, ty1, tx2, ty2 = map(float, tip_box.xyxy[0])
+        tcx, tcy = (tx1 + tx2) / 2, (ty1 + ty2) / 2
+        for u in utensils:
+            ux1, uy1, ux2, uy2 = map(float, u.xyxy[0])
+            if (ux1 - margin <= tcx <= ux2 + margin and
+                    uy1 - margin <= tcy <= uy2 + margin):
+                return True
+        return False
+
+    # 몸통이 하나라도 잡혔으면: 몸통 근처의 끝만 인정 (유령 제거)
+    # 몸통이 아예 없으면: 끝만 단독으로 뜬 상황 → 유령 가능성 높아 버림
+    valid = [t for t in tips if near_utensil(t)] if utensils else []
+    if not valid:
+        return None
+    box = max(valid, key=lambda b: float(b.conf[0]))
     x1, y1, x2, y2 = map(int, box.xyxy[0])
     cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
     cx += int((x2 - x1) * TIP_OFFSET[0])
@@ -551,7 +576,7 @@ async def main():
     async with websockets.serve(handler, HOST, PORT, max_size=None):
         print()
         print("=" * 65)
-        print("AI 스마트 식사 보조 서버 (v22 시연최종 / 로컬·EC2 겸용)")
+        print("AI 스마트 식사 보조 서버 (v23 시연최종 / 로컬·EC2 겸용)")
         print("=" * 65)
         print(f"WebSocket : ws://{HOST}:{PORT}")
         print(f"YOLO      : {MODEL_PATH}")
