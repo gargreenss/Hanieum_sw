@@ -84,7 +84,7 @@ def recognize_food(img: Image.Image) -> dict:
     if FORCE_SEQUENCE:
         food = FORCE_SEQUENCE[_seq_idx % len(FORCE_SEQUENCE)]
         _seq_idx += 1
-        print(f"[시연 시퀀스] {_seq_idx}번째 → {food}")
+      
         return {"food": food, "raw": "(시연 시퀀스)",
                 "input_tokens": 0, "output_tokens": 0}
 
