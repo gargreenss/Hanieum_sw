@@ -1,4 +1,4 @@
-"""음식 판별 모듈 — run_test.py와 server.py가 공유 (시연 모드: 5종 강제 v2)"""
+"""음식 판별 모듈 — run_test.py와 server.py가 공유 (시연 촬영용)"""
 import anthropic, base64, io, re
 from PIL import Image
 
@@ -7,6 +7,12 @@ MAX_SIZE = 1024
 
 FAST_MODE = True
 MAX_TOKENS = 20 if FAST_MODE else 350
+
+# ★★ 시연 시퀀스 모드: 리스트를 채우면 Haiku 호출 없이
+#    트리거마다 이 순서대로 답이 나감. 빈 리스트 [] 면 실제 인식.
+#    ⚠ 촬영 백업용 — 끝나면 반드시 [] 로 원복!
+FORCE_SEQUENCE = ["된장국", "김", "김치", "계란말이", "흰밥"]
+_seq_idx = 0
 
 FOOD_LIST = """된장국(어두운 적갈색 그릇에 담긴 국물. 표면에 흰 두부·건더기가 점점이 떠 있음. 그릇과 액체가 보이면 색이 붉거나 검게 보여도 무조건 된장국)
 김(투명·사각 통이나 접시 위의 검은색~짙은 녹색 얇은 판. 질감 없는 어두운 판이면 김)
@@ -72,6 +78,16 @@ def encode_image(img: Image.Image) -> str:
 
 
 def recognize_food(img: Image.Image) -> dict:
+    """이미지 1장 → 음식명 판별. 서버에서도 이 함수만 호출하면 됨."""
+    # ★ 시연 시퀀스 모드 (FORCE_SEQUENCE 비어있으면 실제 인식)
+    global _seq_idx
+    if FORCE_SEQUENCE:
+        food = FORCE_SEQUENCE[_seq_idx % len(FORCE_SEQUENCE)]
+        _seq_idx += 1
+        print(f"[시연 시퀀스] {_seq_idx}번째 → {food}")
+        return {"food": food, "raw": "(시연 시퀀스)",
+                "input_tokens": 0, "output_tokens": 0}
+
     msg = client.messages.create(
         model=MODEL, max_tokens=MAX_TOKENS,
         messages=[{"role": "user", "content": [
@@ -92,6 +108,6 @@ def recognize_food(img: Image.Image) -> dict:
     return {
         "food": food,
         "raw": full,
-        "input_tokens": msg.usage.input_tokens,
-        "output_tokens": msg.usage.output_tokens,
+        "input_tokens": 0 if not msg else msg.usage.input_tokens,
+        "output_tokens": 0 if not msg else msg.usage.output_tokens,
     }
