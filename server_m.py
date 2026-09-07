@@ -103,7 +103,7 @@ COOLDOWN = 4.0
 CROP_RATIO = 0.18            # ★ 0.25 → 0.18 (크롭 축소: 이웃 음식 혼입 방지)
 MISS_TOLERANCE = 30
 SMOOTH_ALPHA = 0.5
-MOVE_RESET = 40
+MOVE_RESET = 25
 BLUR_THRESHOLD = 20
 TIP_OFFSET = (-0.25, 0.10)   # ★ y 0.25 → 0.10 (끝점이 아래로 밀리는 것 축소) — 웹 디버그 빨간 점으로 검증
 
