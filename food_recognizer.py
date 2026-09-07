@@ -1,18 +1,14 @@
-"""음식 판별 모듈 — run_test.py와 server.py가 공유 (시연 촬영용)"""
-import anthropic, base64, io, re, time, random
+"""음식 판별 모듈 — run_test.py와 server.py가 공유 (실제 인식 / 정량 평가용)"""
+import anthropic, base64, io, re
 from PIL import Image
 
 MODEL = "claude-haiku-4-5"
 MAX_SIZE = 1024
 
+# ★ 속도 모드: True면 음식명만 즉답 (응답 ~1초)
 FAST_MODE = True
-MAX_TOKENS = 20 if FAST_MODE else 350
 
-# ★★ 시연 시퀀스 모드: 리스트를 채우면 Haiku 호출 없이
-#    트리거마다 이 순서대로 답이 나감. 빈 리스트 [] 면 실제 인식.
-#    ⚠ 촬영 백업용 — 끝나면 반드시 [] 로 원복!
-FORCE_SEQUENCE = ["된장국", "김", "김치", "계란말이", "흰밥"]
-_seq_idx = 0
+MAX_TOKENS = 20 if FAST_MODE else 350
 
 FOOD_LIST = """된장국(어두운 적갈색 그릇에 담긴 국물. 표면에 흰 두부·건더기가 점점이 떠 있음. 그릇과 액체가 보이면 색이 붉거나 검게 보여도 무조건 된장국)
 김(투명·사각 통이나 접시 위의 검은색~짙은 녹색 얇은 판. 질감 없는 어두운 판이면 김)
@@ -20,6 +16,7 @@ FOOD_LIST = """된장국(어두운 적갈색 그릇에 담긴 국물. 표면에 
 계란말이(매끈하고 평평한 노란 덩어리 한 개. 표면이 매끈한 단일 블록일 때만 계란말이)
 김치(작은 접시 위에 흩어진 불규칙한 조각들, 붉은~분홍 기운. 액체가 아니라 조각들일 때만 김치)"""  # 30종 확정되면 교체
 
+# ★ 목록에서 이름만 추출한 화이트리스트 — 목록 밖 답 차단용
 VALID_FOODS = {line.split("(")[0].strip() for line in FOOD_LIST.splitlines()}
 VALID_FOODS |= {"없음", "알 수 없는 음식"}
 
@@ -32,6 +29,8 @@ _COMMON = f"""당신은 시각장애인의 식사를 돕는 시스템입니다.
 - 식기로 음식을 집거나 뜨고 있으면 그 음식이 답입니다.
 - 이 사진은 식기 끝 주변만 잘라낸 것이라 식기가 잘 안 보이거나
   일부만 보일 수 있습니다. 식기가 안 보여도 중앙의 음식을 답하세요.
+- 사진에 음식이 전혀 없으면(빈 식탁, 그릇 바닥만 보임) "없음".
+- 목록에 없는 음식이면 가장 비슷한 것을 고르되, 확실히 다르면 "알 수 없는 음식".
 
 촬영 환경 참고: 위에서 강한 조명이 내리쬐어 색이 바래거나 왜곡되고
 사진이 흐릴 수 있습니다. 색은 참고만 하고, 아래 순서로 판정하세요.
@@ -53,9 +52,8 @@ _COMMON = f"""당신은 시각장애인의 식사를 돕는 시스템입니다.
 if FAST_MODE:
     PROMPT = _COMMON + """
 
-반드시 다음 5개 중 하나만 답하세요: 김치, 계란말이, 된장국, 흰밥, 김
-"없음", "알 수 없는 음식", 다른 어떤 답도 금지입니다.
-확실하지 않아도 가장 가능성 높은 것 하나를 반드시 고르세요.
+반드시 위 목록에 있는 이름 그대로, 또는 "없음"/"알 수 없는 음식" 중 하나만 답하세요.
+목록에 없는 이름(예: 두부, 버터, 반찬 재료명)은 절대 답하지 마세요.
 다른 말 없이 답 하나만. 설명, 서식, 문장 금지."""
 else:
     PROMPT = _COMMON + """
@@ -70,6 +68,7 @@ client = anthropic.Anthropic()  # ANTHROPIC_API_KEY 환경변수 사용
 
 
 def encode_image(img: Image.Image) -> str:
+    """PIL 이미지 → 리사이즈 → JPEG → base64"""
     img = img.convert("RGB")
     img.thumbnail((MAX_SIZE, MAX_SIZE))
     buf = io.BytesIO()
@@ -79,16 +78,6 @@ def encode_image(img: Image.Image) -> str:
 
 def recognize_food(img: Image.Image) -> dict:
     """이미지 1장 → 음식명 판별. 서버에서도 이 함수만 호출하면 됨."""
-    # ★ 시연 시퀀스 모드 (FORCE_SEQUENCE 비어있으면 실제 인식)
-    global _seq_idx
-    if FORCE_SEQUENCE:
-        time.sleep(random.uniform(0.85, 1.15))   # 실제 응답 시간과 유사하게
-        food = FORCE_SEQUENCE[_seq_idx % len(FORCE_SEQUENCE)]
-        _seq_idx += 1
-        return {"food": food, "raw": "(시연 시퀀스)",
-                "input_tokens": random.randint(990, 1020),
-                "output_tokens": random.choice([6, 8, 8, 8])}
-
     msg = client.messages.create(
         model=MODEL, max_tokens=MAX_TOKENS,
         messages=[{"role": "user", "content": [
@@ -99,12 +88,13 @@ def recognize_food(img: Image.Image) -> dict:
     )
     full = msg.content[0].text
     m = re.search(r"최종답\s*[:：]\s*(.+)", full)
-    food = m.group(1) if m else full
+    food = m.group(1) if m else full   # FAST_MODE: 응답 전체가 곧 음식명
     food = food.replace("*", "").strip().rstrip(".")
 
+    # ★ 화이트리스트 검증 — 목록 밖 답(두부, 버터 등)은 차단
     if food not in VALID_FOODS:
-        print(f"[판별] 목록 밖 응답: '{food}' → 계란말이로 대체")
-        food = "계란말이"
+        print(f"[판별] 목록 밖 응답 차단: '{food}' → 알 수 없는 음식")
+        food = "알 수 없는 음식"
 
     return {
         "food": food,
