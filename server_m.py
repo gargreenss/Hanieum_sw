@@ -1,7 +1,8 @@
 """
 AI 스마트 식사 보조 시스템 - WebSocket 서버 (v19 통합판 / 로컬·EC2 겸용)
 
-[이번 수정 — v24 / 정량 평가]
+[이번 수정 — v25 / 정량 평가]
+★ 가장자리 유령 차단(EDGE 8px) + MOVE_RESET 40→25
 ★ 시행 자동 기록 — 트리거마다 test_log.csv에 전처리/Haiku/전체 시간·판별
   결과·선명도·conf 자동 append (100회 정량 평가용). ENABLE_TRIAL_LOG 토글
 ★ 블러 임계값 20→45 — 흐린 프레임 오답 차단 (측정 조건 고정)
@@ -106,7 +107,7 @@ COOLDOWN = 4.0
 CROP_RATIO = 0.18            # ★ 0.25 → 0.18 (크롭 축소: 이웃 음식 혼입 방지)
 MISS_TOLERANCE = 30
 SMOOTH_ALPHA = 0.5
-MOVE_RESET = 40
+MOVE_RESET = 25   # ★ 40→25 (안경 시점에선 반찬 간 화면 이동이 작음)
 BLUR_THRESHOLD = 45   # ★ 측정 조건 고정: 흐린 프레임 오답 차단 (정지 시 선명도 90+)
 TIP_OFFSET = (-0.25, 0.10)   # ★ y 0.25 → 0.10 (끝점이 아래로 밀리는 것 축소) — 웹 디버그 빨간 점으로 검증
 
@@ -368,6 +369,20 @@ def get_tip(results):
                 return True
         return False
 
+    # ★ v25: 프레임 가장자리에 걸친 끝 박스는 제외
+    #   (화면 밖으로 잘린 그릇 등이 stick+top 쌍으로 오인되는 케이스 차단)
+    EDGE = 8
+    fh, fw = results[0].orig_shape[:2]
+
+    def not_on_edge(b):
+        x1, y1, x2, y2 = map(float, b.xyxy[0])
+        return (x1 > EDGE and y1 > EDGE and
+                x2 < fw - EDGE and y2 < fh - EDGE)
+
+    tips = [t for t in tips if not_on_edge(t)]
+    if not tips:
+        return None
+
     # 몸통이 하나라도 잡혔으면: 몸통 근처의 끝만 인정 (유령 제거)
     # 몸통이 아예 없으면: 끝만 단독으로 뜬 상황 → 유령 가능성 높아 버림
     valid = [t for t in tips if near_utensil(t)] if utensils else []
@@ -618,7 +633,7 @@ async def main():
     async with websockets.serve(handler, HOST, PORT, max_size=None):
         print()
         print("=" * 65)
-        print("AI 스마트 식사 보조 서버 (v24 정량평가 / 로컬·EC2 겸용)")
+        print("AI 스마트 식사 보조 서버 (v25 정량평가 / 로컬·EC2 겸용)")
         print("=" * 65)
         print(f"WebSocket : ws://{HOST}:{PORT}")
         print(f"YOLO      : {MODEL_PATH}")
