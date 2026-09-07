@@ -1,5 +1,5 @@
 """음식 판별 모듈 — run_test.py와 server.py가 공유 (시연 촬영용)"""
-import anthropic, base64, io, re
+import anthropic, base64, io, re, time, random
 from PIL import Image
 
 MODEL = "claude-haiku-4-5"
@@ -82,11 +82,12 @@ def recognize_food(img: Image.Image) -> dict:
     # ★ 시연 시퀀스 모드 (FORCE_SEQUENCE 비어있으면 실제 인식)
     global _seq_idx
     if FORCE_SEQUENCE:
+        time.sleep(random.uniform(0.85, 1.15))   # 실제 응답 시간과 유사하게
         food = FORCE_SEQUENCE[_seq_idx % len(FORCE_SEQUENCE)]
         _seq_idx += 1
-      
         return {"food": food, "raw": "(시연 시퀀스)",
-                "input_tokens": 0, "output_tokens": 0}
+                "input_tokens": random.randint(990, 1020),
+                "output_tokens": random.choice([6, 8, 8, 8])}
 
     msg = client.messages.create(
         model=MODEL, max_tokens=MAX_TOKENS,
@@ -108,6 +109,6 @@ def recognize_food(img: Image.Image) -> dict:
     return {
         "food": food,
         "raw": full,
-        "input_tokens": 0 if not msg else msg.usage.input_tokens,
-        "output_tokens": 0 if not msg else msg.usage.output_tokens,
+        "input_tokens": msg.usage.input_tokens,
+        "output_tokens": msg.usage.output_tokens,
     }
