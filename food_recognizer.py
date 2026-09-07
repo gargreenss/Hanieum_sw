@@ -404,8 +404,6 @@ def recognize_food(img: Image.Image) -> dict:
         model=MODEL,
         max_tokens=MAX_TOKENS,
 
-        # 같은 사진에 대한 답변 흔들림 최소화
-        temperature=0,
 
         messages=[
             {
