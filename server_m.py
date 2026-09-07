@@ -1,7 +1,10 @@
 """
 AI 스마트 식사 보조 시스템 - WebSocket 서버 (v19 통합판 / 로컬·EC2 겸용)
 
-[이번 수정 — v23 / 시연 최종]
+[이번 수정 — v24 / 정량 평가]
+★ 시행 자동 기록 — 트리거마다 test_log.csv에 전처리/Haiku/전체 시간·판별
+  결과·선명도·conf 자동 append (100회 정량 평가용). ENABLE_TRIAL_LOG 토글
+★ 블러 임계값 20→45 — 흐린 프레임 오답 차단 (측정 조건 고정)
 ★ 유령 top 차단 — 끝점은 식기 몸통(stick 등) 박스 근처일 때만 인정
   (그릇·책상 물건에 뜨는 가짜 top으로 인한 오트리거/오답 제거)
 ★ 크롭 정밀화 — CROP_RATIO 0.18 / TIP_OFFSET y 0.10 (이웃 음식 혼입·끝점 하향 밀림 수정)
@@ -103,8 +106,8 @@ COOLDOWN = 4.0
 CROP_RATIO = 0.18            # ★ 0.25 → 0.18 (크롭 축소: 이웃 음식 혼입 방지)
 MISS_TOLERANCE = 30
 SMOOTH_ALPHA = 0.5
-MOVE_RESET = 25
-BLUR_THRESHOLD = 20
+MOVE_RESET = 40
+BLUR_THRESHOLD = 45   # ★ 측정 조건 고정: 흐린 프레임 오답 차단 (정지 시 선명도 90+)
 TIP_OFFSET = (-0.25, 0.10)   # ★ y 0.25 → 0.10 (끝점이 아래로 밀리는 것 축소) — 웹 디버그 빨간 점으로 검증
 
 # 파란 원 마커 — ★ OFF (크롭 방식 채택 + 현재 프롬프트에 파란 원 문구 없음)
@@ -185,6 +188,39 @@ def preprocess_for_haiku(crop_bgr):
     out = cv2.LUT(out, _GAMMA_LUT)
     out = boost_yellow(out)
     return out
+
+
+
+# ============================================================
+# ★ 시행 자동 기록 (정량 평가용 CSV)
+#   트리거→Haiku 완료까지 구간별 시간과 판별 결과를 한 줄씩 append
+#   컬럼: 시각, 전처리(초), Haiku(초), 전체(초), 음식, 선명도, conf, 클래스
+# ============================================================
+import csv as _csv
+ENABLE_TRIAL_LOG = True
+TRIAL_LOG_PATH = BASE / "test_log.csv"
+
+
+def log_trial(t_confirm, t_haiku_start, t_haiku_end, food, sharpness, conf, tip_class):
+    if not ENABLE_TRIAL_LOG:
+        return
+    try:
+        new_file = not TRIAL_LOG_PATH.exists()
+        with open(TRIAL_LOG_PATH, "a", newline="") as f:
+            w = _csv.writer(f)
+            if new_file:
+                w.writerow(["timestamp", "prep_s", "haiku_s", "total_s",
+                            "food", "sharpness", "conf", "tip_class"])
+            from datetime import datetime
+            w.writerow([
+                datetime.now().isoformat(timespec="seconds"),
+                round(t_haiku_start - t_confirm, 3),
+                round(t_haiku_end - t_haiku_start, 3),
+                round(t_haiku_end - t_confirm, 3),
+                food, round(sharpness, 1), round(conf, 3), tip_class,
+            ])
+    except Exception as e:
+        print("[기록 오류]", e)
 
 
 # ============================================================
@@ -465,6 +501,7 @@ def process_frame(frame, raw_frame, state, notify_processing=None):
                     else:
                         state.last_trigger = now
                         state.last_pos = tip
+                        t_confirm = time.time()   # ★ 트리거 확정 시각 (측정 시작점)
 
                         # ★★ v20: 모든 관문 통과 = Haiku 호출 확정
                         #    → 파이로 processing 신호 먼저 전송 (삑 효과음)
@@ -486,13 +523,18 @@ def process_frame(frame, raw_frame, state, notify_processing=None):
                         try:
                             t0 = time.time()
                             r = ask_haiku(send_img)
-                            print(f"[시간] Haiku 응답 {time.time() - t0:.2f}초")
+                            t1 = time.time()
+                            print(f"[시간] Haiku 응답 {t1 - t0:.2f}초")
                             response["triggered"] = True
                             response["food"] = r.get("food")
                             response["input_tokens"] = r.get("input_tokens")
                             response["output_tokens"] = r.get("output_tokens")
                             print(f"[Haiku] 음식={response['food']} "
                                   f"| in={response['input_tokens']} out={response['output_tokens']}")
+                            # ★ 시행 기록 (CSV)
+                            log_trial(t_confirm, t0, t1, response["food"],
+                                      score, tip_info["confidence"],
+                                      tip_info["class_name"])
                         except Exception as e:
                             print("[Haiku 오류]", repr(e))
     else:
@@ -576,7 +618,7 @@ async def main():
     async with websockets.serve(handler, HOST, PORT, max_size=None):
         print()
         print("=" * 65)
-        print("AI 스마트 식사 보조 서버 (v23 시연최종 / 로컬·EC2 겸용)")
+        print("AI 스마트 식사 보조 서버 (v24 정량평가 / 로컬·EC2 겸용)")
         print("=" * 65)
         print(f"WebSocket : ws://{HOST}:{PORT}")
         print(f"YOLO      : {MODEL_PATH}")
