@@ -108,7 +108,7 @@ CROP_RATIO = 0.18            # ★ 0.25 → 0.18 (크롭 축소: 이웃 음식 �
 MISS_TOLERANCE = 30
 SMOOTH_ALPHA = 0.5
 MOVE_RESET = 25   # ★ 40→25 (안경 시점에선 반찬 간 화면 이동이 작음)
-BLUR_THRESHOLD = 45   # ★ 측정 조건 고정: 흐린 프레임 오답 차단 (정지 시 선명도 90+)
+BLUR_THRESHOLD = 35   # ★ 보정본 기준으로 측정 (아래 is_sharp가 보정 크롭 사용)
 TIP_OFFSET = (-0.25, 0.10)   # ★ y 0.25 → 0.10 (끝점이 아래로 밀리는 것 축소) — 웹 디버그 빨간 점으로 검증
 
 # 파란 원 마커 — ★ OFF (크롭 방식 채택 + 현재 프롬프트에 파란 원 문구 없음)
@@ -122,7 +122,7 @@ BLUE_THICKNESS = 3           # 선 두께
 #   웹 디버그 화면에도 보정된 모습이 그대로 보임 → 눈으로 확인하며 튜닝
 # ============================================================
 ENABLE_FRAME_ENHANCE = True   # 끄면 이전과 동일
-FRAME_GAMMA = 1.0    # ★ 1.25→1.0 (과노출 악화 방지 — 노출은 파이에서 수동 고정)            # 밝기: 1.0=그대로, 1.2~1.4 권장 (클수록 밝음)
+FRAME_GAMMA = 1.5    # ★ YOLO 입력 전용 밝기 (카메라는 어둡게, YOLO만 밝게)            # 밝기: 1.0=그대로, 1.2~1.4 권장 (클수록 밝음)
 FRAME_SAT_GAIN = 1.30         # 채도: 1.0=그대로, 1.2~1.5 권장 (클수록 쨍함)
 
 _FRAME_GAMMA_LUT = np.array(
@@ -506,9 +506,12 @@ def process_frame(frame, raw_frame, state, notify_processing=None):
                 print(f"[보류] 끝점 신뢰도 낮음({tip_info['confidence']:.2f} < {TIP_MIN_CONF}) → 재시도 대기")
             else:
                 crop, crop_box = crop_around(raw_frame, tip)   # ★ Haiku 크롭은 원본 색 (보정 전)
+                # ★ 선명도 검사는 '보정본' 크롭으로 — 어두운 원본에선 점수가
+                #   낮게 나와 흐림이 아니라 어두움을 재는 꼴이 되기 때문
+                enh_crop, _ = crop_around(frame, tip)
 
-                if crop.size != 0:
-                    sharp, score = is_sharp(crop)
+                if crop.size != 0 and enh_crop.size != 0:
+                    sharp, score = is_sharp(enh_crop)
                     response["sharpness"] = round(score, 1)
 
                     if not sharp:
