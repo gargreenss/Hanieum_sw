@@ -108,7 +108,7 @@ CROP_RATIO = 0.18            # ★ 0.25 → 0.18 (크롭 축소: 이웃 음식 �
 MISS_TOLERANCE = 30
 SMOOTH_ALPHA = 0.5
 MOVE_RESET = 25   # ★ 40→25 (안경 시점에선 반찬 간 화면 이동이 작음)
-BLUR_THRESHOLD = 60   # ★ 평활화 기준 임시값 — 정지/움직임 실측으로 확정할 것
+BLUR_THRESHOLD = 40
 TIP_OFFSET = (-0.25, 0.10)   # ★ y 0.25 → 0.10 (끝점이 아래로 밀리는 것 축소) — 웹 디버그 빨간 점으로 검증
 
 # 파란 원 마커 — ★ OFF (크롭 방식 채택 + 현재 프롬프트에 파란 원 문구 없음)
@@ -122,7 +122,7 @@ BLUE_THICKNESS = 3           # 선 두께
 #   웹 디버그 화면에도 보정된 모습이 그대로 보임 → 눈으로 확인하며 튜닝
 # ============================================================
 ENABLE_FRAME_ENHANCE = True   # 끄면 이전과 동일
-FRAME_GAMMA = 1.5    # ★ YOLO 입력 전용 밝기 (카메라는 어둡게, YOLO만 밝게)            # 밝기: 1.0=그대로, 1.2~1.4 권장 (클수록 밝음)
+FRAME_GAMMA = 1.25            # 밝기: 1.0=그대로, 1.2~1.4 권장 (클수록 밝음)
 FRAME_SAT_GAIN = 1.30         # 채도: 1.0=그대로, 1.2~1.5 권장 (클수록 쨍함)
 
 _FRAME_GAMMA_LUT = np.array(
@@ -411,7 +411,6 @@ def is_stopped(state):
 
 def is_sharp(img):
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    gray = cv2.equalizeHist(gray)   # ★ 대비 정규화 — 어두운 음식(된장국 등)도 같은 기준으로
     score = cv2.Laplacian(gray, cv2.CV_64F).var()
     return score >= BLUR_THRESHOLD, score
 
